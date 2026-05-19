@@ -1416,7 +1416,10 @@ func shouldStartAttachedOutputFallbackTurn(content string) bool {
 			continue
 		}
 		block := []string{line}
-		if isTerminalStatusBulletBlock(block) || isNamedTerminalToolBulletBlock(block) {
+		if isNamedTerminalToolBulletBlock(block) {
+			return true
+		}
+		if isTerminalStatusBulletBlock(block) {
 			continue
 		}
 		if strings.HasPrefix(line, "●") || completion {

@@ -9029,6 +9029,32 @@ func TestHandleTerminalOutputLocalInputSignalAfterOutputStillSendsScreenshot(t *
 	})
 }
 
+func TestHandleTerminalOutputScreenshotProgressSuppressesToolTextWhenNoTurn(t *testing.T) {
+	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
+		p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		reg := NewTerminalRegistry("test")
+		info := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/project"})
+		e.SetTerminalRegistry(reg)
+		if err := reg.Attach(info.ID, "feishu:chat:user", "reply-ctx"); err != nil {
+			t.Fatalf("attach terminal: %v", err)
+		}
+
+		content := "● Web Search(\"Figure AI BMW plant robots update 2025 2026\")\n  ⎿  Did0searchesin73s\n────────────────────────────────────────────────────────────→"
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: info.ID, Type: "output", Content: content}); err != nil {
+			t.Fatalf("HandleTerminalOutput returned error: %v", err)
+		}
+
+		if sent := p.getSent(); len(sent) != 0 {
+			t.Fatalf("sent text = %#v, want no leaked tool text", sent)
+		}
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(info.ID)
+			return len(p.getImages()) == 1 && !active
+		})
+	})
+}
+
 func TestHandleTerminalOutputDefaultsToScreenshotProgressModeForAttachedTerminal(t *testing.T) {
 	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
 		p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
