@@ -405,8 +405,8 @@ func TestHandleTerminalLocalInputStartsTurnForAttachedTerminal(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	if _, mode, active := engine.TerminalRegistry().ActiveTurn(info.ID); !active || mode != terminalReplyModeScreenshot {
-		t.Fatalf("active local turn = (active=%v, mode=%v), want screenshot turn", active, mode)
+	if _, mode, active := engine.TerminalRegistry().ActiveTurn(info.ID); !active || mode != terminalReplyModeScreenshotProgress {
+		t.Fatalf("active local turn = (active=%v, mode=%v), want screenshot-progress turn", active, mode)
 	}
 	if got := p.getSent(); len(got) != 1 || got[0] != "Local terminal input received." || strings.Contains(got[0], "local hello") {
 		t.Fatalf("local input notice = %#v, want safe content-free notice", got)
@@ -473,7 +473,7 @@ func TestHandleTerminalLocalInputUsesCurrentReplyMode(t *testing.T) {
 	}
 }
 
-func TestHandleTerminalLocalInputActiveTurnReturnsConflict(t *testing.T) {
+func TestHandleTerminalLocalInputReplacesActiveTurn(t *testing.T) {
 	p := &stubPlatformEngine{n: "feishu"}
 	engine := NewEngine("ClaudeCode", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	engine.SetTerminalRegistry(NewTerminalRegistry("ClaudeCode"))
@@ -494,15 +494,19 @@ func TestHandleTerminalLocalInputActiveTurnReturnsConflict(t *testing.T) {
 	rec := httptest.NewRecorder()
 	api.handleTerminalLocalInput(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, body=%s, want 409", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	got, ok := engine.TerminalRegistry().NextInput(info.ID)
-	if !ok || got != "remote hello" {
-		t.Fatalf("queued PTY input after conflict = (%q, %v), want original remote input", got, ok)
+	if turnID, mode, active := engine.TerminalRegistry().ActiveTurn(info.ID); !active || turnID != 2 || mode != terminalReplyModeScreenshotProgress {
+		t.Fatalf("active turn = (id=%d, mode=%v, active=%v), want replacement local turn", turnID, mode, active)
 	}
-	if got := p.getSent(); len(got) != 0 {
-		t.Fatalf("conflicted local input sent notice = %#v", got)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if got, ok := engine.TerminalRegistry().NextInputContext(ctx, info.ID); ok {
+		t.Fatalf("queued PTY input after replacement = %q, want stale remote input drained", got)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "Local terminal input received." {
+		t.Fatalf("local input notice = %#v, want safe notice", got)
 	}
 }
 

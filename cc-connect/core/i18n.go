@@ -670,11 +670,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "No hay ejecución en progreso.",
 	},
 	MsgTerminalUsage: {
-		LangEnglish:            "Usage: /terminal list | attach <id> | detach | send <text> | mode [text|screenshot|screenshot-progress] | screenshot [latest] [id] | stop <id>",
-		LangChinese:            "用法: /terminal list | attach <id> | detach | send <text> | mode [text|screenshot|screenshot-progress] | screenshot [latest] [id] | stop <id>",
-		LangTraditionalChinese: "用法: /terminal list | attach <id> | detach | send <text> | mode [text|screenshot|screenshot-progress] | screenshot [latest] [id] | stop <id>",
-		LangJapanese:           "使い方: /terminal list | attach <id> | detach | send <text> | mode [text|screenshot|screenshot-progress] | screenshot [latest] [id] | stop <id>",
-		LangSpanish:            "Uso: /terminal list | attach <id> | detach | send <text> | mode [text|screenshot|screenshot-progress] | screenshot [latest] [id] | stop <id>",
+		LangEnglish:            "Usage: /terminal list | attach <id> | detach | send <text> | mode [screenshot-progress] | screenshot [latest] [id] | stop <id>",
+		LangChinese:            "用法: /terminal list | attach <id> | detach | send <text> | mode [screenshot-progress] | screenshot [latest] [id] | stop <id>",
+		LangTraditionalChinese: "用法: /terminal list | attach <id> | detach | send <text> | mode [screenshot-progress] | screenshot [latest] [id] | stop <id>",
+		LangJapanese:           "使い方: /terminal list | attach <id> | detach | send <text> | mode [screenshot-progress] | screenshot [latest] [id] | stop <id>",
+		LangSpanish:            "Uso: /terminal list | attach <id> | detach | send <text> | mode [screenshot-progress] | screenshot [latest] [id] | stop <id>",
 	},
 	MsgTerminalListEmpty: {
 		LangEnglish:            "No terminal sessions are running.",
@@ -831,11 +831,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "La captura de pantalla del terminal estaba vacía y no se envió.",
 	},
 	MsgTerminalModeUsage: {
-		LangEnglish:            "Usage: /terminal mode text|screenshot|screenshot-progress",
-		LangChinese:            "用法: /terminal mode text|screenshot|screenshot-progress",
-		LangTraditionalChinese: "用法: /terminal mode text|screenshot|screenshot-progress",
-		LangJapanese:           "使い方: /terminal mode text|screenshot|screenshot-progress",
-		LangSpanish:            "Uso: /terminal mode text|screenshot|screenshot-progress",
+		LangEnglish:            "Usage: /terminal mode screenshot-progress",
+		LangChinese:            "用法: /terminal mode screenshot-progress",
+		LangTraditionalChinese: "用法: /terminal mode screenshot-progress",
+		LangJapanese:           "使い方: /terminal mode screenshot-progress",
+		LangSpanish:            "Uso: /terminal mode screenshot-progress",
 	},
 	MsgTerminalModeCurrent: {
 		LangEnglish:            "Terminal reply mode: %s",

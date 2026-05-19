@@ -107,11 +107,12 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 </p>
 
 
-## 🆕 What’s New in v1.1.0
+## 🆕 What’s New in v1.1.1
 
 - **Local Claude Terminal Bridge** — Run `cc-connect terminal claude` on your desktop, attach it from Feishu/Lark with `/terminal attach <id>`, and control the same visible Claude TUI from chat.
-- **Selectable terminal reply modes** — `/terminal mode text`, `/terminal mode screenshot`, and `/terminal mode screenshot-progress` let you choose final text, final screenshots, or progress screenshots plus final screenshots.
-- **Final-only terminal replies** — text and screenshot modes wait until the terminal becomes idle, reducing missing tail output and suppressing transient Claude TUI status noise.
+- **CLI ↔ Feishu synchronization fix** — Feishu messages and local desktop Claude TUI input now stay synchronized in both directions, including fresh attach, detach/reattach, and direct local CLI input.
+- **Terminal screenshot-progress replies** — `/terminal mode screenshot-progress` sends progress screenshots for tool stages plus final screenshots after the terminal becomes idle.
+- **Final-only terminal replies** — terminal replies wait until the terminal becomes idle, reducing missing tail output and suppressing transient Claude TUI status noise.
 - **Multi-page terminal screenshots** — long terminal output is sent as ordered PNG pages so scrolled content is not lost.
 - **Latest-turn screenshots** — `/terminal screenshot latest` captures only the latest/current turn, while `/terminal screenshot` keeps the current full terminal screen/history behavior.
 - **Local desktop input feedback** — if you type directly into the local Claude TUI, the attached Feishu chat receives the result using the current reply mode.
@@ -289,8 +290,6 @@ The command prints a terminal ID such as `term_000001`. Attach to it from Feishu
 | `/terminal detach` | Detach the chat from the current terminal. |
 | `/terminal send <text>` | Send one command/message to the attached terminal. After attach, normal chat messages are also forwarded directly. |
 | `/terminal mode` | Show the current reply mode. |
-| `/terminal mode text` | Send final text after the terminal becomes idle. |
-| `/terminal mode screenshot` | Send final ordered PNG screenshots after the terminal becomes idle. |
 | `/terminal mode screenshot-progress` | Send progress screenshots for tool stages plus final screenshots. |
 | `/terminal screenshot` | Send screenshots for the current full terminal screen/history. |
 | `/terminal screenshot latest` | Send screenshots for only the latest/current turn. |

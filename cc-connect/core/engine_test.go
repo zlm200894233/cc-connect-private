@@ -399,6 +399,27 @@ func (p *stubMediaPlatform) getImageCtxs() []any {
 	return cp
 }
 
+type replyCtxRecordingMediaPlatform struct {
+	stubMediaPlatform
+	sentCtxs []any
+}
+
+func (p *replyCtxRecordingMediaPlatform) Send(_ context.Context, replyCtx any, content string) error {
+	p.mu.Lock()
+	p.sent = append(p.sent, content)
+	p.sentCtxs = append(p.sentCtxs, replyCtx)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *replyCtxRecordingMediaPlatform) getSentCtxs() []any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]any, len(p.sentCtxs))
+	copy(cp, p.sentCtxs)
+	return cp
+}
+
 func (p *stubMediaPlatform) getFiles() []FileAttachment {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -8970,7 +8991,45 @@ func TestHandleTerminalOutputDoesNotStartScreenshotTurnForStartupOutput(t *testi
 	}
 }
 
-func TestHandleTerminalOutputDefaultsToScreenshotModeForAttachedTerminal(t *testing.T) {
+func TestHandleTerminalOutputLocalInputSignalAfterOutputStillSendsScreenshot(t *testing.T) {
+	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
+		oldRenderer := terminalScreenshotsRenderer
+		var captured []string
+		terminalScreenshotsRenderer = func(screen *terminalScreen, terminalID string) ([]ImageAttachment, error) {
+			if screen != nil {
+				captured = screen.fullLines()
+			}
+			return []ImageAttachment{{MimeType: "image/png", FileName: "terminal-" + terminalID + ".png", Data: []byte("png")}}, nil
+		}
+		defer func() { terminalScreenshotsRenderer = oldRenderer }()
+
+		p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		reg := NewTerminalRegistry("test")
+		info := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/project"})
+		e.SetTerminalRegistry(reg)
+		if err := reg.Attach(info.ID, "feishu:chat:user", "reply-ctx"); err != nil {
+			t.Fatalf("attach terminal: %v", err)
+		}
+
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: info.ID, Type: "output", Content: "Plain local answer\n✻ Cogitated for 1s"}); err != nil {
+			t.Fatalf("HandleTerminalOutput returned error: %v", err)
+		}
+		if err := e.HandleTerminalLocalInput(TerminalLocalInputRequest{TerminalID: info.ID, Content: "<local-input>"}); err != nil {
+			t.Fatalf("HandleTerminalLocalInput returned error: %v", err)
+		}
+
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(info.ID)
+			return len(p.getImages()) == 1 && !active
+		})
+		if !strings.Contains(strings.Join(captured, "\n"), "Plain local answer") {
+			t.Fatalf("captured screen = %#v, want local answer", captured)
+		}
+	})
+}
+
+func TestHandleTerminalOutputDefaultsToScreenshotProgressModeForAttachedTerminal(t *testing.T) {
 	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
 		p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -8984,8 +9043,8 @@ func TestHandleTerminalOutputDefaultsToScreenshotModeForAttachedTerminal(t *test
 		if !ok {
 			t.Fatal("reply mode lookup failed")
 		}
-		if mode != terminalReplyModeScreenshot {
-			t.Fatalf("reply mode = %v, want screenshot mode", mode)
+		if mode != terminalReplyModeScreenshotProgress {
+			t.Fatalf("reply mode = %v, want screenshot-progress mode", mode)
 		}
 		if err := reg.SendInput(info.ID, "hello"); err != nil {
 			t.Fatalf("start terminal turn: %v", err)
@@ -9372,6 +9431,9 @@ func TestHandleTerminalOutputScreenshotModeDoesNotSendProgressScreenshot(t *test
 	e.SetTerminalRegistry(reg)
 	if err := reg.Attach(info.ID, "feishu:chat:user", "reply-ctx"); err != nil {
 		t.Fatalf("attach terminal: %v", err)
+	}
+	if !reg.SetReplyMode(info.ID, terminalReplyModeScreenshot) {
+		t.Fatal("set screenshot mode failed")
 	}
 	if err := reg.SendInput(info.ID, "weather"); err != nil {
 		t.Fatalf("start screenshot turn: %v", err)
@@ -9780,6 +9842,114 @@ func TestHandleTerminalOutputLocalInputScreenshotModeUsesTerminalDeliveryContext
 		}
 		if got := p.getImageCtxs(); len(got) != 1 || got[0] != "chat-only-ctx" {
 			t.Fatalf("screenshot contexts = %#v, want chat-only terminal delivery context", got)
+		}
+	})
+}
+
+func TestHandleTerminalLocalInputAfterDetachAttachUsesNewTerminalTarget(t *testing.T) {
+	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
+		p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		reg := NewTerminalRegistry("test")
+		oldInfo := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/old"})
+		newInfo := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/new"})
+		e.SetTerminalRegistry(reg)
+		sessionKey := "feishu:chat:user"
+		if err := reg.Attach(oldInfo.ID, sessionKey, "old-reply-ctx"); err != nil {
+			t.Fatalf("attach old terminal: %v", err)
+		}
+		if err := reg.Detach(sessionKey); err != nil {
+			t.Fatalf("detach old terminal: %v", err)
+		}
+		if err := reg.Attach(newInfo.ID, sessionKey, "new-reply-ctx"); err != nil {
+			t.Fatalf("attach new terminal: %v", err)
+		}
+
+		if err := e.HandleTerminalLocalInput(TerminalLocalInputRequest{TerminalID: newInfo.ID, Content: "<local-input>"}); err != nil {
+			t.Fatalf("HandleTerminalLocalInput returned error: %v", err)
+		}
+		if _, mode, active := reg.ActiveTurn(newInfo.ID); !active || mode != terminalReplyModeScreenshotProgress {
+			t.Fatalf("active local turn = (active=%v, mode=%v), want screenshot-progress on new terminal", active, mode)
+		}
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: newInfo.ID, Type: "output", Content: "● answer from new terminal\n✻ Cogitated for 1s"}); err != nil {
+			t.Fatalf("HandleTerminalOutput returned error: %v", err)
+		}
+
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(newInfo.ID)
+			return len(p.getImages()) == 1 && !active
+		})
+		ctxs := p.getImageCtxs()
+		if len(ctxs) != 1 || ctxs[0] != "new-reply-ctx" {
+			t.Fatalf("image contexts = %#v, want new attach reply context", ctxs)
+		}
+	})
+}
+
+func TestCmdTerminalDetachAttachThenLocalInputUsesNewReplyContext(t *testing.T) {
+	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
+		p := &replyCtxRecordingMediaPlatform{stubMediaPlatform: stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		reg := NewTerminalRegistry("test")
+		oldInfo := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/old"})
+		newInfo := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/new"})
+		e.SetTerminalRegistry(reg)
+		sessionKey := "feishu:chat:user"
+
+		e.cmdTerminal(p, &Message{SessionKey: sessionKey, ReplyCtx: "old-attach-ctx"}, []string{"attach", oldInfo.ID})
+		e.cmdTerminal(p, &Message{SessionKey: sessionKey, ReplyCtx: "detach-ctx"}, []string{"detach"})
+		e.cmdTerminal(p, &Message{SessionKey: sessionKey, ReplyCtx: "new-attach-ctx"}, []string{"attach", newInfo.ID})
+		attached, ok := reg.AttachedForSession(sessionKey)
+		if !ok || attached.ID != newInfo.ID {
+			t.Fatalf("attached terminal = %#v, ok=%v; want %s", attached, ok, newInfo.ID)
+		}
+
+		if err := e.HandleTerminalLocalInput(TerminalLocalInputRequest{TerminalID: newInfo.ID, Content: "<local-input>"}); err != nil {
+			t.Fatalf("HandleTerminalLocalInput returned error: %v", err)
+		}
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: newInfo.ID, Type: "output", Content: "● answer after command reattach\n✻ Cogitated for 1s"}); err != nil {
+			t.Fatalf("HandleTerminalOutput returned error: %v", err)
+		}
+
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(newInfo.ID)
+			return len(p.getImages()) == 1 && !active
+		})
+		if ctxs := p.getImageCtxs(); len(ctxs) != 1 || ctxs[0] != "new-attach-ctx" {
+			t.Fatalf("image contexts = %#v, want new attach context", ctxs)
+		}
+	})
+}
+
+func TestCmdTerminalDetachKeepsLocalInputDeliveryTarget(t *testing.T) {
+	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
+		p := &replyCtxRecordingMediaPlatform{stubMediaPlatform: stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		reg := NewTerminalRegistry("test")
+		info := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/project"})
+		e.SetTerminalRegistry(reg)
+		sessionKey := "feishu:chat:user"
+
+		e.cmdTerminal(p, &Message{SessionKey: sessionKey, ReplyCtx: "attach-ctx"}, []string{"attach", info.ID})
+		e.cmdTerminal(p, &Message{SessionKey: sessionKey, ReplyCtx: "detach-ctx"}, []string{"detach"})
+		if _, ok := reg.AttachedForSession(sessionKey); ok {
+			t.Fatal("detach should stop chat-to-terminal attachment")
+		}
+		p.clearSent()
+
+		if err := e.HandleTerminalLocalInput(TerminalLocalInputRequest{TerminalID: info.ID, Content: "<local-input>"}); err != nil {
+			t.Fatalf("HandleTerminalLocalInput returned error: %v", err)
+		}
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: info.ID, Type: "output", Content: "● detached local answer\n✻ Cogitated for 1s"}); err != nil {
+			t.Fatalf("HandleTerminalOutput returned error: %v", err)
+		}
+
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(info.ID)
+			return len(p.getImages()) == 1 && !active
+		})
+		if ctxs := p.getImageCtxs(); len(ctxs) != 1 || ctxs[0] != "attach-ctx" {
+			t.Fatalf("image contexts = %#v, want retained attach context", ctxs)
 		}
 	})
 }
@@ -11035,12 +11205,12 @@ func TestCmdTerminalModeShowsCurrentMode(t *testing.T) {
 	}
 	e.cmdTerminal(p, msg, []string{"mode"})
 
-	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Terminal reply mode: screenshot" {
-		t.Fatalf("sent = %#v, want current screenshot mode", sent)
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Terminal reply mode: screenshot-progress" {
+		t.Fatalf("sent = %#v, want current screenshot-progress mode", sent)
 	}
 }
 
-func TestCmdTerminalModeScreenshot(t *testing.T) {
+func TestCmdTerminalModeRejectsScreenshot(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	reg := NewTerminalRegistry("test")
@@ -11051,17 +11221,14 @@ func TestCmdTerminalModeScreenshot(t *testing.T) {
 	if err := reg.Attach(info.ID, msg.SessionKey, msg.ReplyCtx); err != nil {
 		t.Fatalf("attach terminal: %v", err)
 	}
-	if !reg.SetAttachedReplyMode(msg.SessionKey, terminalReplyModeText) {
-		t.Fatal("set text mode failed")
-	}
 	e.cmdTerminal(p, msg, []string{"mode", "screenshot"})
 
 	mode, ok := reg.AttachedReplyMode(msg.SessionKey)
-	if !ok || mode != terminalReplyModeScreenshot {
-		t.Fatalf("mode = %v, ok=%v; want screenshot", mode, ok)
+	if !ok || mode != terminalReplyModeScreenshotProgress {
+		t.Fatalf("mode = %v, ok=%v; want unchanged screenshot-progress", mode, ok)
 	}
-	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Terminal reply mode set to screenshot." {
-		t.Fatalf("sent = %#v, want screenshot mode confirmation", sent)
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Usage: /terminal mode screenshot-progress" {
+		t.Fatalf("sent = %#v, want screenshot-progress-only mode usage", sent)
 	}
 }
 
@@ -11087,7 +11254,7 @@ func TestCmdTerminalModeScreenshotProgress(t *testing.T) {
 	}
 }
 
-func TestCmdTerminalModeText(t *testing.T) {
+func TestCmdTerminalModeRejectsText(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	reg := NewTerminalRegistry("test")
@@ -11101,18 +11268,18 @@ func TestCmdTerminalModeText(t *testing.T) {
 	e.cmdTerminal(p, msg, []string{"mode", "text"})
 
 	mode, ok := reg.AttachedReplyMode(msg.SessionKey)
-	if !ok || mode != terminalReplyModeText {
-		t.Fatalf("mode = %v, ok=%v; want text", mode, ok)
+	if !ok || mode != terminalReplyModeScreenshotProgress {
+		t.Fatalf("mode = %v, ok=%v; want unchanged screenshot-progress", mode, ok)
 	}
-	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Terminal reply mode set to text." {
-		t.Fatalf("sent = %#v, want text mode confirmation", sent)
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Usage: /terminal mode screenshot-progress" {
+		t.Fatalf("sent = %#v, want screenshot-progress-only mode usage", sent)
 	}
 }
 
-func TestParseTerminalReplyModeScreenshotProgressAlias(t *testing.T) {
+func TestParseTerminalReplyModeRejectsProgressAlias(t *testing.T) {
 	mode, ok := parseTerminalReplyMode("progress")
-	if !ok || mode != terminalReplyModeScreenshotProgress {
-		t.Fatalf("parse progress = %v, %v; want screenshot-progress", mode, ok)
+	if ok || mode != terminalReplyModeText {
+		t.Fatalf("parse progress = %v, %v; want rejected", mode, ok)
 	}
 }
 
@@ -11143,10 +11310,10 @@ func TestCmdTerminalModeRejectsUnknownMode(t *testing.T) {
 	e.cmdTerminal(p, msg, []string{"mode", "image"})
 
 	mode, ok := reg.AttachedReplyMode(msg.SessionKey)
-	if !ok || mode != terminalReplyModeScreenshot {
-		t.Fatalf("mode = %v, ok=%v; want unchanged screenshot", mode, ok)
+	if !ok || mode != terminalReplyModeScreenshotProgress {
+		t.Fatalf("mode = %v, ok=%v; want unchanged screenshot-progress", mode, ok)
 	}
-	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Usage: /terminal mode text|screenshot|screenshot-progress" {
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != "Usage: /terminal mode screenshot-progress" {
 		t.Fatalf("sent = %#v, want mode usage", sent)
 	}
 }
@@ -11231,6 +11398,116 @@ func TestCmdTerminalScreenshotLatestExcludesRedrawnTerminalHistory(t *testing.T)
 		}
 		if !strings.Contains(latestText, "new answer") {
 			t.Fatalf("latest screenshot text = %q, want new answer", latestText)
+		}
+	})
+}
+
+func TestHandleTerminalLocalInputReplacesStaleRemoteTurn(t *testing.T) {
+	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
+		oldRenderer := terminalScreenshotsRenderer
+		var captureLatest bool
+		var latestText string
+		terminalScreenshotsRenderer = func(screen *terminalScreen, terminalID string) ([]ImageAttachment, error) {
+			if captureLatest && screen != nil {
+				latestText = strings.Join(screen.fullLines(), "\n")
+			}
+			return []ImageAttachment{{MimeType: "image/png", FileName: "terminal-" + terminalID + ".png", Data: []byte("png")}}, nil
+		}
+		defer func() { terminalScreenshotsRenderer = oldRenderer }()
+
+		p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		reg := NewTerminalRegistry("test")
+		info := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/project"})
+		e.SetTerminalRegistry(reg)
+		if err := reg.Attach(info.ID, "feishu:chat:user", "reply-ctx"); err != nil {
+			t.Fatalf("attach terminal: %v", err)
+		}
+		if err := reg.SendInput(info.ID, "remote question from feishu"); err != nil {
+			t.Fatalf("start stale remote turn: %v", err)
+		}
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: info.ID, Type: "output", Content: "● remote answer from feishu turn\nRoosting..."}); err != nil {
+			t.Fatalf("HandleTerminalOutput stale remote turn returned error: %v", err)
+		}
+
+		if err := e.HandleTerminalLocalInput(TerminalLocalInputRequest{TerminalID: info.ID, Content: "<local-input>"}); err != nil {
+			t.Fatalf("HandleTerminalLocalInput should replace stale remote turn, got error: %v", err)
+		}
+		turnID, mode, active := reg.ActiveTurn(info.ID)
+		if !active || turnID != 2 || mode != terminalReplyModeScreenshotProgress {
+			t.Fatalf("active turn = (id=%d, mode=%v, active=%v), want local screenshot-progress turn 2", turnID, mode, active)
+		}
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: info.ID, Type: "output", Content: "● local answer after stale remote\n✻ Cogitated for 1s"}); err != nil {
+			t.Fatalf("HandleTerminalOutput local turn returned error: %v", err)
+		}
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(info.ID)
+			return len(p.getImages()) == 1 && !active
+		})
+
+		captureLatest = true
+		e.cmdTerminal(p, &Message{SessionKey: "feishu:chat:user", ReplyCtx: "reply-ctx"}, []string{"screenshot", "latest"})
+		if strings.Contains(latestText, "remote answer from feishu turn") {
+			t.Fatalf("latest screenshot text = %q, should not show stale Feishu turn", latestText)
+		}
+		if !strings.Contains(latestText, "local answer after stale remote") {
+			t.Fatalf("latest screenshot text = %q, want local CLI answer", latestText)
+		}
+	})
+}
+
+func TestCmdTerminalScreenshotLatestUsesCompletedLocalInputTurn(t *testing.T) {
+	withTerminalScreenshotFinalIdleDelay(t, 20*time.Millisecond, func() {
+		oldRenderer := terminalScreenshotsRenderer
+		var captureLatest bool
+		var latestText string
+		terminalScreenshotsRenderer = func(screen *terminalScreen, terminalID string) ([]ImageAttachment, error) {
+			if captureLatest && screen != nil {
+				latestText = strings.Join(screen.fullLines(), "\n")
+			}
+			return []ImageAttachment{{MimeType: "image/png", FileName: "terminal-" + terminalID + ".png", Data: []byte("png")}}, nil
+		}
+		defer func() { terminalScreenshotsRenderer = oldRenderer }()
+
+		p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		reg := NewTerminalRegistry("test")
+		info := reg.Register(TerminalRegisterRequest{Project: "test", WorkDir: "/tmp/project"})
+		e.SetTerminalRegistry(reg)
+		if err := reg.Attach(info.ID, "feishu:chat:user", "reply-ctx"); err != nil {
+			t.Fatalf("attach terminal: %v", err)
+		}
+		if err := reg.SendInput(info.ID, "remote question from feishu"); err != nil {
+			t.Fatalf("start remote turn: %v", err)
+		}
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: info.ID, Type: "output", Content: "● remote answer from feishu turn\n✻ Sautéed for 1s"}); err != nil {
+			t.Fatalf("HandleTerminalOutput remote turn returned error: %v", err)
+		}
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(info.ID)
+			return len(p.getImages()) == 1 && !active
+		})
+
+		if err := e.HandleTerminalLocalInput(TerminalLocalInputRequest{TerminalID: info.ID, Content: "<local-input>"}); err != nil {
+			t.Fatalf("HandleTerminalLocalInput returned error: %v", err)
+		}
+		localRedraw := "\x1b[2J● remote answer from feishu turn\n● local answer from desktop cli\n✻ Cogitated for 1s"
+		if err := e.HandleTerminalOutput(TerminalOutputRequest{TerminalID: info.ID, Type: "output", Content: localRedraw}); err != nil {
+			t.Fatalf("HandleTerminalOutput local turn returned error: %v", err)
+		}
+		eventually(t, func() bool {
+			_, _, active := reg.ActiveTurn(info.ID)
+			return len(p.getImages()) == 2 && !active
+		})
+
+		captureLatest = true
+		e.cmdTerminal(p, &Message{SessionKey: "feishu:chat:user", ReplyCtx: "reply-ctx"}, []string{"screenshot", "latest"})
+
+		if strings.Contains(latestText, "remote answer from feishu turn") {
+			t.Fatalf("latest screenshot text = %q, should not show previous Feishu turn", latestText)
+		}
+		if !strings.Contains(latestText, "local answer from desktop cli") {
+			t.Fatalf("latest screenshot text = %q, want latest local CLI answer", latestText)
 		}
 	})
 }

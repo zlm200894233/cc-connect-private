@@ -108,11 +108,7 @@ func terminalReplyModeName(mode terminalReplyMode) string {
 
 func parseTerminalReplyMode(value string) (terminalReplyMode, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "text":
-		return terminalReplyModeText, true
-	case "screenshot":
-		return terminalReplyModeScreenshot, true
-	case "screenshot-progress", "progress":
+	case "screenshot-progress":
 		return terminalReplyModeScreenshotProgress, true
 	default:
 		return terminalReplyModeText, false
@@ -132,6 +128,8 @@ type terminalLocalInputTarget struct {
 type terminalSession struct {
 	info                           TerminalSessionInfo
 	replyCtx                       any
+	localOutputSessionKey          string
+	localOutputReplyCtx            any
 	inputCh                        chan string
 	done                           chan struct{}
 	status                         terminalStatusPreview
@@ -141,6 +139,7 @@ type terminalSession struct {
 	turnID                         uint64
 	activeTurnID                   uint64
 	activeTurnMode                 terminalReplyMode
+	activeTurnLocalOutput          bool
 	turnScreenshotInFlight         bool
 	turnMessages                   []string
 	turnScreen                     *terminalScreen
@@ -221,7 +220,7 @@ func (r *TerminalRegistry) Register(req TerminalRegisterRequest) TerminalSession
 		inputCh:   make(chan string, 64),
 		done:      make(chan struct{}),
 		screen:    newTerminalScreen(0, 0),
-		replyMode: terminalReplyModeScreenshot,
+		replyMode: terminalReplyModeScreenshotProgress,
 	}
 	r.mu.Unlock()
 	return info
@@ -292,6 +291,8 @@ func (r *TerminalRegistry) Attach(id, sessionKey string, replyCtx any) error {
 
 	session.info.AttachedKey = sessionKey
 	session.replyCtx = replyCtx
+	session.localOutputSessionKey = sessionKey
+	session.localOutputReplyCtx = replyCtx
 	return nil
 }
 
@@ -385,6 +386,24 @@ func (r *TerminalRegistry) AttachedTarget(terminalID string) (TerminalSessionInf
 	return session.info, session.replyCtx, true
 }
 
+func (r *TerminalRegistry) TerminalDeliveryTarget(terminalID string) (TerminalSessionInfo, any, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	session, ok := r.sessions[terminalID]
+	if !ok {
+		return TerminalSessionInfo{}, nil, false
+	}
+	if session.info.AttachedKey != "" {
+		return session.info, session.replyCtx, true
+	}
+	if session.localOutputSessionKey == "" {
+		return TerminalSessionInfo{}, nil, false
+	}
+	info := session.info
+	info.AttachedKey = session.localOutputSessionKey
+	return info, session.localOutputReplyCtx, true
+}
+
 func (r *TerminalRegistry) TerminalScreenSnapshot(id string) (*terminalScreen, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -461,14 +480,29 @@ func (r *TerminalRegistry) StartLocalInputForTurnTarget(id, content string) (uin
 		return 0, mode, terminalLocalInputTarget{}, fmt.Errorf("terminal %q not found", id)
 	default:
 	}
-	if session.info.AttachedKey == "" {
+	target := terminalLocalInputTarget{}
+	if session.info.AttachedKey != "" {
+		target = terminalLocalInputTarget{Attached: true, SessionKey: session.info.AttachedKey, ReplyCtx: session.replyCtx}
+	} else if session.localOutputSessionKey != "" {
+		target = terminalLocalInputTarget{Attached: true, SessionKey: session.localOutputSessionKey, ReplyCtx: session.localOutputReplyCtx}
+	} else {
 		return 0, mode, terminalLocalInputTarget{}, nil
 	}
-	target := terminalLocalInputTarget{Attached: true, SessionKey: session.info.AttachedKey, ReplyCtx: session.replyCtx}
 	if session.activeTurnID != 0 {
-		return 0, mode, target, fmt.Errorf("%w: terminal %q is still processing previous input", ErrTerminalTurnActive, id)
+		if session.activeTurnLocalOutput {
+			return session.activeTurnID, session.activeTurnMode, target, nil
+		}
+		session.saveLatestTurnScreen()
+		for {
+			select {
+			case <-session.inputCh:
+				continue
+			default:
+				return session.beginTurn(mode, true), mode, target, nil
+			}
+		}
 	}
-	return session.beginTurn(mode), mode, target, nil
+	return session.beginTurn(mode, true), mode, target, nil
 }
 
 func (r *TerminalRegistry) StartAttachedOutputTurnIfIdle(id string) (uint64, terminalReplyMode, bool) {
@@ -488,7 +522,7 @@ func (r *TerminalRegistry) StartAttachedOutputTurnIfIdle(id string) (uint64, ter
 		return 0, session.replyMode, false
 	}
 	mode := session.replyMode
-	return session.beginTurn(mode), mode, true
+	return session.beginTurn(mode, true), mode, true
 }
 
 func (r *TerminalRegistry) SendControlInput(id, content string) error {
@@ -514,10 +548,11 @@ func (r *TerminalRegistry) SendControlInput(id, content string) error {
 	}
 }
 
-func (s *terminalSession) beginTurn(mode terminalReplyMode) uint64 {
+func (s *terminalSession) beginTurn(mode terminalReplyMode, localOutput bool) uint64 {
 	s.turnID++
 	s.activeTurnID = s.turnID
 	s.activeTurnMode = mode
+	s.activeTurnLocalOutput = localOutput
 	s.turnScreenshotInFlight = false
 	s.turnProgressScreenshotInFlight = false
 	s.turnProgressScreenshotsSent = 0
@@ -602,7 +637,7 @@ func (r *TerminalRegistry) startTerminalInputForTurn(id, content string, mode te
 	case <-session.done:
 		return 0, fmt.Errorf("terminal %q not found", id)
 	case session.inputCh <- content:
-		return session.beginTurn(mode), nil
+		return session.beginTurn(mode, false), nil
 	default:
 		return 0, fmt.Errorf("terminal %q input queue is full", id)
 	}
@@ -660,6 +695,7 @@ func (r *TerminalRegistry) CompleteActiveTurn(id string, turnID uint64) bool {
 	session.turnScreen = nil
 	session.activeTurnID = 0
 	session.activeTurnMode = terminalReplyModeText
+	session.activeTurnLocalOutput = false
 	return true
 }
 
@@ -996,6 +1032,7 @@ func (r *TerminalRegistry) CompleteTurnScreenshot(id string, turnID uint64, _ bo
 	session.turnScreen = nil
 	session.activeTurnID = 0
 	session.activeTurnMode = terminalReplyModeText
+	session.activeTurnLocalOutput = false
 	return true
 }
 
@@ -1191,7 +1228,7 @@ func (e *Engine) HandleTerminalLocalInput(req TerminalLocalInputRequest) error {
 func (e *Engine) HandleTerminalOutput(req TerminalOutputRequest) error {
 	reg := e.TerminalRegistry()
 	if req.Error != "" {
-		session, replyCtx, ok := reg.AttachedTarget(req.TerminalID)
+		session, replyCtx, ok := reg.TerminalDeliveryTarget(req.TerminalID)
 		if !ok {
 			return nil
 		}
@@ -1210,7 +1247,7 @@ func (e *Engine) HandleTerminalOutput(req TerminalOutputRequest) error {
 	}
 
 	plain := plainTerminalOutput(req.Content)
-	session, replyCtx, ok := reg.AttachedTarget(req.TerminalID)
+	session, replyCtx, ok := reg.TerminalDeliveryTarget(req.TerminalID)
 	var target Platform
 	if ok {
 		var err error
@@ -1369,13 +1406,29 @@ func renderTerminalProgressMessage(content string, metrics terminalProgressMetri
 }
 
 func shouldStartAttachedOutputFallbackTurn(content string) bool {
+	if looksLikeTerminalStartupOutput(content) {
+		return false
+	}
+	completion := isTerminalCompletionSignal(content) || isTerminalPromptReturnCompletionSignal(content)
 	for _, line := range keptTerminalOutputLines(content) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		block := []string{line}
-		if strings.HasPrefix(strings.TrimSpace(line), "●") && !isTerminalStatusBulletBlock(block) && !isNamedTerminalToolBulletBlock(block) {
+		if isTerminalStatusBulletBlock(block) || isNamedTerminalToolBulletBlock(block) {
+			continue
+		}
+		if strings.HasPrefix(line, "●") || completion {
 			return true
 		}
 	}
 	return false
+}
+
+func looksLikeTerminalStartupOutput(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "claude code v") || strings.Contains(lower, "welcome to claude code")
 }
 
 func terminalFinalMessages(messages []string) []string {

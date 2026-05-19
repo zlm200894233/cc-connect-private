@@ -1,26 +1,27 @@
 # Changelog
 
-## v1.1.0 (2026-05-19)
+## v1.1.1 (2026-05-19)
 
-Local Terminal Bridge release for controlling a real local Claude Code TUI from Feishu/Lark while still watching the same terminal on the desktop.
+Local Terminal Bridge patch release for reliable two-way synchronization between Feishu/Lark and the local Claude Code TUI.
 
 ### Added
 - **Local terminal broker**: `cc-connect terminal claude` starts a local Claude terminal, registers it with the cc-connect daemon, and prints a `term_xxxxxx` terminal ID for chat-side attachment.
-- **Feishu terminal commands**: `/terminal list`, `/terminal attach <id>`, `/terminal detach`, `/terminal send <text>`, `/terminal mode [text|screenshot|screenshot-progress]`, `/terminal screenshot`, and `/terminal screenshot latest`.
-- **Reply modes**: text mode waits for terminal idle before sending final text; screenshot mode sends final PNG screenshots after the terminal becomes visually idle; screenshot-progress mode can send progress screenshots plus the final screenshot.
+- **Feishu terminal commands**: `/terminal list`, `/terminal attach <id>`, `/terminal detach`, `/terminal send <text>`, `/terminal mode [screenshot-progress]`, `/terminal screenshot`, and `/terminal screenshot latest`.
+- **Reply mode**: screenshot-progress mode can send progress screenshots plus final PNG screenshots after the terminal becomes visually idle.
 - **Multi-page screenshots**: screenshot replies preserve scrolled terminal output by sending ordered PNG pages instead of only the final visible viewport.
 - **Local desktop input feedback**: when a user types directly into the local Claude TUI, cc-connect reports the resulting output back to the attached Feishu chat using the current terminal reply mode.
 
 ### Fixed
+- **CLI ↔ Feishu synchronization**: local desktop Claude TUI input now triggers a local terminal turn and sends the resulting screenshots back to Feishu even when terminal output arrives before the local-input signal.
+- **Fresh attach and detach/reattach delivery**: local CLI output uses the current or retained terminal delivery target so Feishu keeps receiving results after reconnecting to a terminal.
 - **Feishu async image delivery**: terminal screenshots are delivered to the chat instead of being hidden under an old `/terminal attach` reply thread.
 - **`/terminal screenshot latest`**: latest screenshots now prefer the latest/current turn instead of replaying old terminal history.
 - **Terminal screenshot readability**: improved Windows font loading and symbol fallback for terminal glyphs such as `⎿`, `❯`, and `✻`.
 - **Dynamic TUI noise**: text replies suppress transient Claude TUI status lines such as Roosting/Context/progress frames and wait for idle completion.
 
 ### Verification
-- `go test ./core -count=1`
-- `go test ./cmd/cc-connect -run 'Terminal' -count=1 -v`
-- `go test ./... -count=1`
+- `go test ./core -run 'TerminalOutput|TerminalLocalInput|CmdTerminalDetach|CmdTerminalScreenshot|CmdTerminalMode|TerminalScreen|RenderTerminalScreenshot|RenderTerminalScreenshots' -count=1`
+- `go test ./cmd/cc-connect -run 'Terminal' -count=1`
 - `go build ./cmd/cc-connect`
 
 ## v1.3.2 (2026-04-21)
