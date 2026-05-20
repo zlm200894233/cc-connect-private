@@ -604,6 +604,36 @@ func (w *captureWriter) String() string {
 	return w.content
 }
 
+func TestTerminalResizeMonitorFollowsWindowSizeChanges(t *testing.T) {
+	proc := newFakeTerminalProcess()
+	stdout, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create temp stdout: %v", err)
+	}
+	defer stdout.Close()
+
+	var sizeMu sync.Mutex
+	width, height := 120, 40
+	oldGetSize := terminalGetSize
+	terminalGetSize = func(int) (int, int, error) {
+		sizeMu.Lock()
+		defer sizeMu.Unlock()
+		return width, height, nil
+	}
+	t.Cleanup(func() { terminalGetSize = oldGetSize })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := startTerminalResizeMonitor(ctx, stdout, proc, time.Millisecond)
+	defer stop()
+
+	waitForResize(t, proc, 120, 40)
+	sizeMu.Lock()
+	width, height = 90, 24
+	sizeMu.Unlock()
+	waitForResize(t, proc, 90, 24)
+}
+
 func TestPollTerminalInputIgnoresEmptyContent(t *testing.T) {
 	var calls int
 	writer := &captureWriter{}
@@ -727,6 +757,9 @@ type fakeTerminalProcess struct {
 	writes    []string
 	writeNfy  chan string
 	writesMu  sync.Mutex
+	resizes   [][2]int
+	resizeNfy chan [2]int
+	resizeMu  sync.Mutex
 	closeRead sync.Once
 	closeWait sync.Once
 	waitErr   error
@@ -734,9 +767,10 @@ type fakeTerminalProcess struct {
 
 func newFakeTerminalProcess() *fakeTerminalProcess {
 	return &fakeTerminalProcess{
-		readCh:   make(chan []byte, 8),
-		writeNfy: make(chan string, 8),
-		waitCh:   make(chan struct{}),
+		readCh:    make(chan []byte, 8),
+		writeNfy:  make(chan string, 8),
+		resizeNfy: make(chan [2]int, 8),
+		waitCh:    make(chan struct{}),
 	}
 }
 
@@ -758,6 +792,18 @@ func (p *fakeTerminalProcess) Write(data []byte) (int, error) {
 	default:
 	}
 	return len(data), nil
+}
+
+func (p *fakeTerminalProcess) Resize(width, height int) error {
+	call := [2]int{width, height}
+	p.resizeMu.Lock()
+	p.resizes = append(p.resizes, call)
+	p.resizeMu.Unlock()
+	select {
+	case p.resizeNfy <- call:
+	default:
+	}
+	return nil
 }
 
 func (p *fakeTerminalProcess) Close() error {
@@ -785,6 +831,26 @@ func (p *fakeTerminalProcess) Writes() []string {
 	out := make([]string, len(p.writes))
 	copy(out, p.writes)
 	return out
+}
+
+func waitForResize(t *testing.T, proc *fakeTerminalProcess, width, height int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		proc.resizeMu.Lock()
+		for _, call := range proc.resizes {
+			if call[0] == width && call[1] == height {
+				proc.resizeMu.Unlock()
+				return
+			}
+		}
+		proc.resizeMu.Unlock()
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for resize %dx%d", width, height)
+		case <-proc.resizeNfy:
+		}
+	}
 }
 
 type fakeTerminalPTY struct {

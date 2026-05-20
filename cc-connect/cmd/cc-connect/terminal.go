@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -47,10 +48,12 @@ var errTerminalUsage = errors.New("show terminal usage")
 var defaultTerminalPTY terminalPTY = realTerminalPTY{}
 var defaultTerminalConsole terminalConsole = realTerminalConsole{}
 var terminalServiceBaseURL = "http://unix"
+var terminalGetSize = term.GetSize
 
 const terminalCleanupTimeout = 5 * time.Second
 const terminalPostTimeout = 3 * time.Second
 const terminalEmptyInputPollDelay = 200 * time.Millisecond
+const terminalResizePollInterval = 250 * time.Millisecond
 const terminalLocalInputSignalContent = "<local-input>"
 
 func runTerminal(args []string) {
@@ -436,8 +439,54 @@ func (realTerminalConsole) Prepare(stdin io.Reader, stdout io.Writer, proc termi
 	if err != nil {
 		return nil, fmt.Errorf("set local terminal raw mode: %w", err)
 	}
-	resizeTerminalProcess(out, proc)
-	return func() { _ = term.Restore(int(in.Fd()), oldState) }, nil
+	stopResize := startTerminalResizeMonitor(context.Background(), out, proc, terminalResizePollInterval)
+	return func() {
+		stopResize()
+		_ = term.Restore(int(in.Fd()), oldState)
+	}, nil
+}
+
+func startTerminalResizeMonitor(ctx context.Context, stdout *os.File, proc terminalProcess, interval time.Duration) func() {
+	resizer, ok := proc.(terminalResizer)
+	if !ok || stdout == nil {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = terminalResizePollInterval
+	}
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		lastWidth, lastHeight := 0, 0
+		resizeIfChanged := func() {
+			width, height, err := terminalGetSize(int(stdout.Fd()))
+			if err != nil || width <= 0 || height <= 0 {
+				return
+			}
+			if width == lastWidth && height == lastHeight {
+				return
+			}
+			if err := resizer.Resize(width, height); err == nil {
+				lastWidth, lastHeight = width, height
+			}
+		}
+		resizeIfChanged()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				resizeIfChanged()
+			}
+		}
+	}()
+	return func() {
+		stopOnce.Do(func() { close(done) })
+	}
 }
 
 func resizeTerminalProcess(stdout *os.File, proc terminalProcess) {
@@ -445,7 +494,7 @@ func resizeTerminalProcess(stdout *os.File, proc terminalProcess) {
 	if !ok {
 		return
 	}
-	width, height, err := term.GetSize(int(stdout.Fd()))
+	width, height, err := terminalGetSize(int(stdout.Fd()))
 	if err != nil || width <= 0 || height <= 0 {
 		return
 	}
